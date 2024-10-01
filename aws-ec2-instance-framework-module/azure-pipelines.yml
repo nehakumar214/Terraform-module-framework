@@ -1,0 +1,151 @@
+trigger:
+  batch: true
+  branches:
+    include:
+      - version/*
+      - feature/*
+      - bugfix/*
+    exclude:
+      - version/*-on-*
+      - feature/*-on-*
+      - bugfix/*-on-*
+      - main
+
+name: $(Build.DefinitionName)_$(Build.SourceBranch)_$(Date:yyyyMMdd)$(Rev:.r)_$(Build.RequestedFor)_$(Build.BuildId)
+
+#pool:
+name: nehakumar.DevTest
+  
+pool:
+    vmImage: 'windows-latest'
+
+variables:
+  - name: branchRef
+    value: "$(Build.SourceBranch)"
+  - group: "dpFramework"
+  - name: rootWikiPage
+    ${{ if contains(variables['Build.SourceBranch'], 'version') }}:
+      value: "TerraformModules-ReadMe"
+    ${{ if contains(variables['Build.SourceBranch'], 'feature') }}:
+      value: "TerraformModules-ReadMe-PreRelease"
+    ${{ if contains(variables['Build.SourceBranch'], 'bugfix') }}:  
+      value: "TerraformModules-ReadMe-PreRelease"
+  - name: pkgContainerName
+    ${{ if contains(variables['Build.SourceBranch'], 'version') }}:
+      value: "dpiltfmodules"
+    ${{ if contains(variables['Build.SourceBranch'], 'feature') }}:  
+      value: "dpiltfmodules-pre"
+    ${{ if contains(variables['Build.SourceBranch'], 'bugfix') }}:  
+      value: "dpiltfmodules-pre"  
+  - name: rootUri
+    value: "git://Platform_DevOps/tooling@refs/heads/main"
+  - name: rootIndexPage
+    ${{ if contains(variables['Build.SourceBranch'], 'version') }}:
+      value: "TerraformModule-Index-Prod"
+    ${{ if contains(variables['Build.SourceBranch'], 'feature') }}:  
+      value: "TerraformModule-Index-PreRelease"  
+    ${{ if contains(variables['Build.SourceBranch'], 'bugfix') }}:  
+      value: "TerraformModule-Index-PreRelease"    
+
+stages:
+  - stage: PublishPackage
+    displayName: 'Publish Terraform Module'
+    jobs:
+      - job: PublishPackage
+        displayName: 'Prepare and Publish Module'
+        timeoutInMinutes: "30"
+        workspace:
+          clean: all
+        steps:
+          - checkout: self
+          - checkout: "git://Platform_DevOps/tooling@refs/heads/main"
+          - task: PowerShell@2
+            displayName: 'Calculate Targets'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $version = (("$(branchRef)").Substring("refs/heads/".length)).Split("/")[1]
+                if (-not("$(branchRef)").Contains("version"))
+                {
+                  $version = "$($version)-pre"
+                }
+                Write-Host "##vso[task.setvariable variable=moduleVersion]$version"
+                Write-Host "##vso[task.setvariable variable=MODULE_TEST_VERSION]$version"
+          - task: PowerShell@2
+            displayName: 'Create ReadME in Wiki'
+            continueOnError: false
+            inputs:
+              filePath: $(Pipeline.Workspace)\s\tooling\tfModulePublish/Publish-ReadMe.ps1
+              arguments: '-content (Get-Content -Path "$(Pipeline.Workspace)\s\$(Build.DefinitionName)\README.md" -Raw).ToString() -IlName "$(Build.DefinitionName)" -IlVersion $(moduleVersion) -PAT "$($env:patToken)" -rootWiki "$(rootWikiPage)"'
+              errorActionPreference: stop
+            env:
+              patToken: $(abc.PAT)
+
+          - task: DeleteFiles@1
+            displayName: 'Prepare for packaging'
+            inputs:
+              SourceFolder: $(Pipeline.Workspace)\s\$(Build.DefinitionName)
+              Contents: |
+                .git
+                README.md
+              RemoveDotFiles: true
+          
+          - task: replacetokens@3
+            displayName: 'Stamp Version'
+            inputs:
+              rootDirectory: "$(Pipeline.Workspace)"
+              targetFiles: "$(Pipeline.Workspace)/s/$(Build.DefinitionName)/main.tf"
+              encoding: "auto"
+              writeBOM: true
+              escapeType: "none"
+              actionOnMissing: "warn"
+              keepToken: false
+              tokenPrefix: "__"
+              tokenSuffix: "__"
+              useLegacyPattern: false
+              enableTelemetry: true
+
+          - task: ArchiveFiles@2
+            displayName: 'Create Package'
+            inputs:
+              rootFolderOrFile: "$(Pipeline.Workspace)/s/$(Build.DefinitionName)/"
+              archiveFile: "$(Build.ArtifactStagingDirectory)/$(Build.DefinitionName)-$(moduleVersion).zip"
+              archiveType: zip
+              replaceExistingArchive: true
+              includeRootFolder: false
+          
+          - task: PowerShell@2
+            displayName: 'Upload Package'
+            continueOnError: false
+            inputs:
+              filePath: $(Pipeline.Workspace)\s\tooling\tfModulePublish\Upload-Package.ps1
+              arguments: '-strAccName "devOps" -strAccAccessKey $env:ARM_ACCESS_KEY -ContainerName "$(pkgContainerName)" -IdentifierTag "$(Build.DefinitionName)" -FilePath "$(Build.ArtifactStagingDirectory)/$(Build.DefinitionName)-$(moduleVersion).zip" -BlobName "$(Build.DefinitionName)-$(moduleVersion).zip"'
+              errorActionPreference: stop
+            env:
+              ARM_ACCESS_KEY: $(ARM-ACCESS-KEY)
+
+  - stage: IndexUpdate
+    displayName: 'Index Update'
+    jobs:
+      - job: PublishIndex
+        displayName: 'Prepare and Publish Index'
+        timeoutInMinutes: "30"
+        workspace:
+          clean: all
+        steps:
+          - checkout: "git://Platform_DevOps/tooling@refs/heads/main"
+          - task: PowerShell@2
+            displayName: 'Update Index'
+            continueOnError: false
+            inputs:
+              filePath: $(Build.SourcesDirectory)\tfModulePublish\Publish-Index.ps1
+              arguments: '-strAccName "devOps" -strAccAccessKey $env:ARM_ACCESS_KEY -moduleContainer "$(pkgContainerName)" -rootUrl "$(rootUri)" -sasToken $env:SASToken -rootWiki "$(rootIndexPage)" -PAT $env:patToken'
+              errorActionPreference: stop
+            env:
+              ARM_ACCESS_KEY: $(ARM-ACCESS-KEY)
+              SASToken: $(tf-module-sas-token)
+              patToken: $(AdoPAT)
+
+
+
+
