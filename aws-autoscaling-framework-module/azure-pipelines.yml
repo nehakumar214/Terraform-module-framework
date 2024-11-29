@@ -4,7 +4,7 @@ trigger:
     include:
       - version/*
       - feature/*
-      - bugfix/*
+      - main
     exclude:
       - version/*-on-*
       - feature/*-on-*
